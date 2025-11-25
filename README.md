@@ -11,3 +11,21 @@ Attendees to this session will learn:
 2. Explore network construction using soft-thresholding power selection and topological overlap matrices (TOMs);
 3. Visualize module–trait associations through heatmaps and correlation plots.
 4. Learn how to extract hub or driver genes from key modules using intramodular connectivity and gene significance analysis.
+
+📘 Dataset Description
+
+This project uses a publicly available bulk RNA-seq dataset derived from peripheral blood mononuclear cells (PBMCs) to explore immune responses during SARS-CoV-2 infection.
+The dataset includes samples from:
+
+- COVID-19 patients
+
+- age- and sex-matched healthy controls
+
+Originally published in the study “Systems biological assessment of immunity to severe and mild COVID-19 infections”, the dataset captures transcriptomic changes associated with mild, moderate, and severe disease. It provides a clean and well-annotated resource for demonstrating WGCNA-based construction of gene co-expression networks.
+
+This dataset is ideal for teaching purposes because it:
+
+- Contains a clear binary trait (COVID vs. Control)
+- Has sufficient sample size for network analysis
+- Shows coordinated immune-related expression changes that produce interpretable modules
+   
