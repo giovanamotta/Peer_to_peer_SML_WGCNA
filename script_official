@@ -1,0 +1,201 @@
+# Beyond gene lists. Explore Gene Co-expression with WGCNA package in RStudio.
+## Peer-to-Peer Teaching Summer Season 2025 -- Giovana Motta
+
+# === Load required packages ===
+# Only install these packages if not already installed.
+# BiocManager manages Bioconductor packages (e.g. DESeq2, GEOquery).
+# WGCNA: main package for co-expression network analysis
+# CorLevelPlot and gridExtra: used for advanced visualizations
+
+# Installing and loading packages
+#install.packages("BiocManager")
+#BiocManager::install(c("WGCNA", "devtools"))
+library(WGCNA)
+#BiocManager::install("DESeq2")
+library(DESeq2)
+#BiocManager::install("GEOquery")
+library(GEOquery)
+#install.packages("tidyverse")
+library(tidyverse)
+#install.packages("remotes")
+#remotes::install_github("kevinblighe/CorLevelPlot")
+library(CorLevelPlot)
+#install.packages("gridExtra")
+library(gridExtra)
+
+# Enable multithreading (optional)
+allowWGCNAThreads()
+
+
+# === 1. Load and prepare expression data ===
+setwd("C:/Users/agiov/OneDrive/Desktop/Workshop_31_07")
+data <- read.delim('GSE152418_p20047_Study1_RawCounts.txt', header = TRUE)
+
+# Download metadata from GEO using GEOquery
+gse <- getGEO("GSE152418", GSEMatrix = TRUE)
+phenoData <- pData(phenoData(gse[[1]]))
+phenoData <- phenoData[,c(1,2,46:50)]
+
+# Tidy data: reshape count matrix and merge with phenotype info
+data <- data %>%
+  gather(key = 'samples', value = 'counts', -ENSEMBLID) %>%
+  mutate(samples = gsub('\\.', '-', samples)) %>%
+  inner_join(phenoData, by = c('samples' = 'title')) %>%
+  select(1,3,4) %>%
+  spread(key = 'geo_accession', value = 'counts') %>%
+  column_to_rownames(var = 'ENSEMBLID')
+
+
+# === 2. Quality control (outlier detection) ===
+# Detect poor-quality genes and samples using built-in WGCNA function
+gsg <- goodSamplesGenes(t(data))
+summary(gsg)
+data <- data[gsg$goodGenes == TRUE, ]
+
+# Cluster samples to detect outliers visually
+htree <- hclust(dist(t(data)), method = "average")
+plot(htree)
+
+# Principal Component Analysis (PCA) for additional QC check
+pca <- prcomp(t(data))
+pca.var.percent <- round((pca$sdev^2 / sum(pca$sdev^2)) * 100, 2)
+
+ggplot(as.data.frame(pca$x), aes(PC1, PC2)) +
+  geom_point() +
+  geom_text(label = rownames(pca$x)) +
+  labs(x = paste0("PC1: ", pca.var.percent[1], "%"),
+       y = paste0("PC2: ", pca.var.percent[2], "%"))
+
+# Manually exclude samples deemed as outliers from clustering/PCA
+samples.to.be.excluded <- c('GSM4615000', 'GSM4614993', 'GSM4614995')
+data.subset <- data[, !(colnames(data) %in% samples.to.be.excluded)]
+
+
+# === 3. Normalization using DESeq2 ===
+# Create metadata table aligned with filtered samples
+colData <- phenoData %>%
+  filter(!row.names(.) %in% samples.to.be.excluded)
+names(colData) <- gsub(':ch1', '', names(colData))
+names(colData) <- gsub('\\s', '_', names(colData))
+
+# Ensure alignment between colData and data.subset
+stopifnot(all(rownames(colData) == colnames(data.subset)))
+
+# Create DESeq2 dataset with no design formula (exploratory)
+dds <- DESeqDataSetFromMatrix(countData = data.subset,
+                              colData = colData,
+                              design = ~ 1)
+
+# Filter low-count genes: retain only genes expressed at count >=15 in >=75% samples
+dds75 <- dds[rowSums(counts(dds) >= 15) >= 24, ]
+
+# Variance Stabilizing Transformation (VST) for WGCNA compatibility
+dds_norm <- vst(dds75)
+norm.counts <- t(assay(dds_norm))
+
+
+# === 4. Network Construction ===
+# Determine soft-thresholding power to approximate scale-free topology
+power <- c(1:10, seq(12, 50, 2))
+sft <- pickSoftThreshold(norm.counts, powerVector = power,
+                         networkType = "signed", verbose = 5)
+
+# Visualize scale-free topology fit and mean connectivity
+grid.arrange(
+  ggplot(sft$fitIndices, aes(Power, SFT.R.sq, label = Power)) +
+    geom_point() +
+    geom_text(nudge_y = 0.1) +
+    geom_hline(yintercept = 0.8, color = 'red') +
+    labs(x = 'Power', y = 'Scale Free Topology Model Fit') +
+    theme_classic(),
+  
+  ggplot(sft$fitIndices, aes(Power, mean.k., label = Power)) +
+    geom_point() +
+    geom_text(nudge_y = 0.1) +
+    labs(x = 'Power', y = 'Mean Connectivity') +
+    theme_classic(),
+  nrow = 2
+)
+
+# Use chosen power (example: 18)
+soft_power <- 18
+
+# Build the co-expression network using blockwiseModules
+bwnet <- blockwiseModules(norm.counts,
+                          maxBlockSize = 14000,
+                          TOMType = "signed",
+                          power = soft_power,
+                          mergeCutHeight = 0.25,
+                          numericLabels = FALSE,
+                          randomSeed = 1234,
+                          verbose = 3)
+
+
+# === 5. Module Eigengenes and Dendrograms ===
+module_eigengenes <- bwnet$MEs
+plotDendroAndColors(bwnet$dendrograms[[1]],
+                    cbind(bwnet$unmergedColors, bwnet$colors),
+                    c("Unmerged", "Merged"),
+                    dendroLabels = FALSE,
+                    addGuide = TRUE,
+                    hang = 0.03)
+
+
+# === 6A. Relating Modules to External Traits ===
+# Goal: Correlate module eigengenes (summary profiles of gene modules) with external sample traits (e.g., disease status, severity)
+
+# Create a binary variable indicating whether the sample is from a COVID patient (1) or not (0)
+traits <- colData %>% 
+  mutate(disease_state_bin = ifelse(grepl("COVID", disease_state), 1, 0)) %>% 
+  select(8)  # Selects the 8th column only, assumed to be 'disease_state_bin'
+
+# Ensure severity is an ordered factor (helps later in trait binarization)
+colData$severity <- factor(colData$severity,
+                           levels = c("Healthy", "Convalescent", "ICU", "Moderate", "Severe"))
+
+# Convert the categorical variable 'severity' into binary dummy variables (1 for each level vs all others)
+# This allows correlation analysis with module eigengenes
+severity.out <- binarizeCategoricalColumns(colData$severity,
+                                           includePairwise = FALSE,     # Do not include pairwise contrasts
+                                           includeLevelVsAll = TRUE,    # Include one-vs-all for each level
+                                           minCount = 1)                # Include all levels with at least one sample
+
+# Combine disease_state_bin and severity binary matrix into one trait matrix
+traits <- cbind(traits, severity.out)
+
+# Compute Pearson correlation between each module eigengene and each trait
+module.trait.corr <- cor(module_eigengenes, traits, use = 'p')
+
+# Compute p-values for each correlation using Student's t-distribution
+module.trait.corr.pvals <- corPvalueStudent(module.trait.corr, nrow(norm.counts))
+
+# Prepare data for correlation heatmap
+heatmap.data <- merge(module_eigengenes, traits, by = 'row.names') %>% 
+  column_to_rownames(var = 'Row.names')
+
+# Plot a heatmap with correlation levels between modules (rows) and traits (columns)
+CorLevelPlot(heatmap.data,
+             x = names(heatmap.data)[18:22],  # Trait columns (adjust based on actual column indices)
+             y = names(heatmap.data)[1:17],   # Module eigengene columns
+             col = c("blue1", "skyblue", "white", "pink", "red"))  # Gradient color scale
+
+# === 6B. Intramodular Analysis: Driver Gene Identification ===
+# Goal: Identify hub genes—those highly correlated with both a module and an external trait
+
+# Calculate Module Membership (MM): correlation of each gene with each module eigengene
+# High MM indicates that the gene is central to the module
+module.membership <- cor(module_eigengenes, norm.counts, use = 'p')
+module.membership.pvals <- corPvalueStudent(module.membership, nrow(norm.counts))
+
+# Calculate Gene Significance (GS): correlation of each gene’s expression with a specific trait (e.g., Severe vs all)
+# High GS indicates biological relevance to the trait of interest
+gene.signf <- cor(norm.counts, traits$data.Severe.vs.all, use = 'p')
+gene.signf.pvals <- corPvalueStudent(gene.signf, nrow(norm.counts))
+
+# Identify top 25 genes with the highest significance (lowest p-values) for severity
+as.data.frame(gene.signf.pvals) %>% 
+  arrange(V1) %>% 
+  head(25)
+
+# Combine gene significance and module membership in downstream analysis to prioritize candidate hub genes
+
